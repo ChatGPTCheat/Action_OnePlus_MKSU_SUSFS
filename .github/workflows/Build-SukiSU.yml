@@ -6,7 +6,7 @@ on:
         type: choice
         description: "分支"
         required: true
-        default: sm8650
+        default: sm8550
         options:
           - sm7550
           - sm7675
@@ -19,7 +19,7 @@ on:
         type: choice
         description: "配置文件"
         required: true
-        default: oneplus_pad2_v
+        default: oneplus_ace2_pro_v
         options:
           - oneplus_nord_ce4_v
           - oneplus_ace_3v_v
@@ -60,7 +60,7 @@ on:
         type: choice
         description: "内核安卓版本"
         required: true
-        default: android14
+        default: android15
         options:
           - android12
           - android13
@@ -70,7 +70,7 @@ on:
        type: choice
        description: "内核版本"
        required: true
-       default: "6.1"
+       default: "5.15"
        options:
          - "5.10"
          - "5.15"
@@ -103,7 +103,7 @@ on:
         type: boolean
         description: "是否启用添加更多的ZRAM算法？"
         required: true
-        default: true
+        default: false
 
 jobs:
   build:
@@ -344,6 +344,15 @@ jobs:
         run: |
          cd kernel_workspace
          LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ github.event.inputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }}
+
+      - name: Zip Kernel Source
+        run: |
+          zip -r9 --exclude='*.git*' kernel_source.zip kernel_workspace
+      - name: Upload Kernel Source
+        uses: actions/upload-artifact@v4
+        with:
+          name: Patched-Kernel-Source
+          path: kernel_source.zip
 
       - name: Make AnyKernel3
         run: |
