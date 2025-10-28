@@ -83,7 +83,6 @@ on:
         options:
           - gki
           - perf
-      # ========== ОБЪЕДИНЁННЫЕ ОПЦИИ ==========
       FEATURES:
         type: choice
         description: "特性组合 (DBG=kernel_dbg模块)"
@@ -124,7 +123,6 @@ jobs:
         run: |
           FEATURES="${{ github.event.inputs.FEATURES }}"
           
-          # Определяем флаги
           if [[ "$FEATURES" == *"VFS"* ]]; then
             echo "VFS=true" >> $GITHUB_OUTPUT
           else
@@ -200,37 +198,30 @@ jobs:
           rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
           rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      # ========== ИНТЕГРАЦИЯ KERNEL_DBG ==========
+      # ========== ИСПРАВЛЕННАЯ ИНТЕГРАЦИЯ KERNEL_DBG ==========
       - name: Apply kernel_dbg integration patch
         if: ${{ steps.parse_features.outputs.ENABLE_KERNEL_DBG == 'true' }}
         run: |
           cd kernel_workspace/kernel_platform
           
-          echo "Создание патча для интеграции kernel_dbg в qcom_stats.c..."
+          echo "🔧 Создание точного патча для интеграции kernel_dbg в qcom_stats.c..."
           
-          cat <<'EOFPATCH' > patch_kernel_dbg.patch
+          cat <<'EOFPATCH' > patch_kernel_dbg_fixed.patch
           --- a/msm-kernel/drivers/soc/qcom/qcom_stats.c
           +++ b/msm-kernel/drivers/soc/qcom/qcom_stats.c
-          @@ -5,6 +5,8 @@
-           
-           #include <linux/debugfs.h>
-           #include <linux/device.h>
-          +#include <linux/pid.h>
-          +#include <linux/proc_fs.h>
-           #include <linux/io.h>
-           #include <linux/module.h>
-           #include <linux/of.h>
-          @@ -13,6 +15,7 @@
-           #include <linux/slab.h>
-           #include <linux/string.h>
-           #include <linux/sysfs.h>
-          +#include <linux/mm.h>
+          @@ -16,6 +16,9 @@
+           #include <linux/ktime.h>
+           #include <linux/qcom_scm.h>
            #include <clocksource/arm_arch_timer.h>
+          +#include <linux/pid.h>
+          +#include <linux/mm.h>
+          +#include <linux/highmem.h>
            
-           #define STAT_TYPE_ADDR		0x0
-          @@ -22,6 +25,168 @@
-           #define STAT_TYPE_OFFSET_ACCUMULATED	0x10
-           #define STAT_TYPE_OFFSET_CLIENT_VOTES	0x14
+           //Begin George
+           #include <linux/proc_fs.h>
+          @@ -46,6 +49,158 @@
+           #define APSS_MASTER_STATS_MAGIC 0x4D54534D
+           #define MAX_MASTER_NAME_LEN 32
            
           +/* ========== KERNEL_DBG EDUCATIONAL MODULE START ========== */
           +
@@ -408,11 +399,10 @@ jobs:
            struct subsystem_data {
            	const char *name;
            	u32 smem_item;
-          @@ -200,6 +365,13 @@ static int qcom_stats_probe(struct platform_device *pdev)
-           	}
+          @@ -931,6 +1086,12 @@ static int qcom_stats_probe(struct platform_device *pdev)
            
            	platform_set_drvdata(pdev, drv);
-          +
+           
           +	/* Initialize kernel_dbg proc interface */
           +	stats_proc_entry = proc_create("debug_stats", 0600, NULL, &stats_proc_ops);
           +	if (!stats_proc_entry) {
@@ -422,7 +412,7 @@ jobs:
            	return 0;
            
            fail:
-          @@ -212,6 +384,11 @@ static int qcom_stats_remove(struct platform_device *pdev)
+          @@ -943,6 +1104,11 @@ static int qcom_stats_remove(struct platform_device *pdev)
            	struct qcom_stats_data *drv = platform_get_drvdata(pdev);
            
            	debugfs_remove_recursive(drv->root);
@@ -436,12 +426,17 @@ jobs:
            
           EOFPATCH
           
-          echo "Применение патча к qcom_stats.c..."
-          patch -p1 -F 3 < patch_kernel_dbg.patch || {
-            echo "ВНИМАНИЕ: Патч применён с предупреждениями, но продолжаем"
-          }
+          echo "📝 Применение исправленного патча..."
+          patch -p1 < patch_kernel_dbg_fixed.patch
           
-          echo "Интеграция kernel_dbg завершена!"
+          if [ $? -eq 0 ]; then
+              echo "✅ Патч успешно применён без ошибок!"
+          else
+              echo "❌ Ошибка применения патча! Проверьте логи."
+              exit 1
+          fi
+          
+          echo "🎉 Интеграция kernel_dbg завершена!"
 
       - name: Force remove -dirty suffix
         run: |
@@ -549,9 +544,7 @@ jobs:
 
           sed -i 's/check_defconfig//' ./common/build.config.gki
 
-          # ZRAM конфигурация
           if [ "${{ github.event.inputs.ZRAM }}" = "true" ]; then
-            # ... (остальная логика ZRAM без изменений)
             if [ "${{ github.event.inputs.KERNEL_VERSION }}" = "5.10" ]; then
               echo "CONFIG_ZSMALLOC=y" >> "$CONFIG_FILE"
               echo "CONFIG_ZRAM=y" >> "$CONFIG_FILE"
