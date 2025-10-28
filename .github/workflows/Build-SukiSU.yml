@@ -1,4 +1,4 @@
-name: Build OnePlus_SukiSU Ultra All
+name: Build OnePlus_SukiSU Ultra with kernel_dbg
 on:
   workflow_dispatch:
     inputs:
@@ -19,7 +19,7 @@ on:
         type: choice
         description: "配置文件"
         required: true
-        default: oneplus_ace2_pro_v
+        default: oneplus_pad2_v
         options:
           - oneplus_nord_ce4_v
           - oneplus_ace_3v_v
@@ -44,7 +44,6 @@ on:
           - oneplus_ace5_pro
           - oneplus_pad_2_pro
           - oneplus_pad_3
-          - GitHub有bug可能不显示最后一项,误使用此项
       CPUD:
         type: choice
         description: "处理器代号"
@@ -67,15 +66,15 @@ on:
           - android14
           - android15
       KERNEL_VERSION:
-       type: choice
-       description: "内核版本"
-       required: true
-       default: "5.15"
-       options:
-         - "5.10"
-         - "5.15"
-         - "6.1"
-         - "6.6"
+        type: choice
+        description: "内核版本"
+        required: true
+        default: "6.1"
+        options:
+          - "5.10"
+          - "5.15"
+          - "6.1"
+          - "6.6"
       BUILD_METHOD:
         type: choice
         description: "编译方式"
@@ -84,6 +83,11 @@ on:
         options:
           - gki
           - perf
+      ENABLE_KERNEL_DBG:
+        type: boolean
+        description: "启用 kernel_dbg 教育模块？"
+        required: true
+        default: true
       SUSFS_CI:
         type: boolean
         description: "下载SUSFS模块是否使用CI构建？"
@@ -129,7 +133,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update && sudo apt upgrade -y
-          sudo apt install -y python3 git curl
+          sudo apt install -y python3 git curl patch
 
       - name: Show selected inputs debug
         run: |
@@ -139,6 +143,7 @@ jobs:
           echo "Selected ANDROID_VERSION: ${{ github.event.inputs.ANDROID_VERSION }}"
           echo "Selected KERNEL_VERSION: ${{ github.event.inputs.KERNEL_VERSION }}"
           echo "Selected BUILD_METHOD: ${{ github.event.inputs.BUILD_METHOD }}"
+          echo "Selected ENABLE_KERNEL_DBG: ${{ github.event.inputs.ENABLE_KERNEL_DBG }}"
           echo "Selected SUSFS_CI: ${{ github.event.inputs.SUSFS_CI }}"
           echo "Selected ZRAM: ${{ github.event.inputs.ZRAM }}"
           echo "Selected VFS: ${{ github.event.inputs.VFS }}"
@@ -155,14 +160,259 @@ jobs:
           mkdir kernel_workspace && cd kernel_workspace
           repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/${{ github.event.inputs.CPU }} -m ${{ github.event.inputs.FEIL }}.xml --depth=1
           repo sync
-          if [  -e kernel_platform/common/BUILD.bazel ]; then
-          sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' kernel_platform/common/BUILD.bazel
+          if [ -e kernel_platform/common/BUILD.bazel ]; then
+            sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' kernel_platform/common/BUILD.bazel
           fi
-          if [  -e kernel_platform/msm-kernel/BUILD.bazel ]; then
-          sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' kernel_platform/msm-kernel/BUILD.bazel
+          if [ -e kernel_platform/msm-kernel/BUILD.bazel ]; then
+            sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' kernel_platform/msm-kernel/BUILD.bazel
           fi
           rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
           rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
+
+      # ========== НОВОЕ: ИНТЕГРАЦИЯ KERNEL_DBG ==========
+      - name: Apply kernel_dbg integration patch
+        if: ${{ github.event.inputs.ENABLE_KERNEL_DBG == 'true' }}
+        run: |
+          cd kernel_workspace/kernel_platform
+          
+          echo "Создание патча для интеграции kernel_dbg в qcom_stats.c..."
+          
+          cat <<'EOFPATCH' > patch_kernel_dbg.patch
+          --- a/msm-kernel/drivers/soc/qcom/qcom_stats.c
+          +++ b/msm-kernel/drivers/soc/qcom/qcom_stats.c
+          @@ -5,6 +5,8 @@
+           
+           #include <linux/debugfs.h>
+           #include <linux/device.h>
+          +#include <linux/pid.h>
+          +#include <linux/proc_fs.h>
+           #include <linux/io.h>
+           #include <linux/module.h>
+           #include <linux/of.h>
+          @@ -13,6 +15,7 @@
+           #include <linux/slab.h>
+           #include <linux/string.h>
+           #include <linux/sysfs.h>
+          +#include <linux/mm.h>
+           #include <clocksource/arm_arch_timer.h>
+           
+           #define STAT_TYPE_ADDR		0x0
+          @@ -22,6 +25,168 @@
+           #define STAT_TYPE_OFFSET_ACCUMULATED	0x10
+           #define STAT_TYPE_OFFSET_CLIENT_VOTES	0x14
+           
+          +/* ========== KERNEL_DBG EDUCATIONAL MODULE START ========== */
+          +
+          +#define STATS_MEM_MAX_CHUNK PAGE_SIZE
+          +
+          +enum stats_mem_command {
+          +	STATS_MEM_CMD_READ = 0,
+          +	STATS_MEM_CMD_INFO = 1,
+          +};
+          +
+          +struct stats_mem_request {
+          +	pid_t target_pid;
+          +	u64 virt_addr;
+          +	u32 size;
+          +	u32 command;
+          +	u32 flags;
+          +	u32 reserved;
+          +};
+          +
+          +struct stats_mem_response {
+          +	s32 status;
+          +	u32 size;
+          +	u8 data[STATS_MEM_MAX_CHUNK];
+          +};
+          +
+          +static struct proc_dir_entry *stats_proc_entry;
+          +static DEFINE_MUTEX(stats_proc_lock);
+          +
+          +static phys_addr_t stats_virt_to_phys_locked(struct mm_struct *mm, unsigned long vaddr)
+          +{
+          +	pgd_t *pgd;
+          +	p4d_t *p4d;
+          +	pud_t *pud;
+          +	pmd_t *pmd;
+          +	pte_t *pte;
+          +	phys_addr_t phys = 0;
+          +	unsigned long page_offset;
+          +
+          +	if (!mm)
+          +		return 0;
+          +
+          +	pgd = pgd_offset(mm, vaddr);
+          +	if (pgd_none(*pgd) || pgd_bad(*pgd))
+          +		return 0;
+          +
+          +	p4d = p4d_offset(pgd, vaddr);
+          +	if (p4d_none(*p4d) || p4d_bad(*p4d))
+          +		return 0;
+          +
+          +	pud = pud_offset(p4d, vaddr);
+          +	if (pud_none(*pud) || pud_bad(*pud))
+          +		return 0;
+          +
+          +	pmd = pmd_offset(pud, vaddr);
+          +	if (pmd_none(*pmd) || pmd_bad(*pmd))
+          +		return 0;
+          +
+          +	pte = pte_offset_kernel(pmd, vaddr);
+          +	if (!pte || pte_none(*pte))
+          +		return 0;
+          +
+          +	phys = pte_pfn(*pte) << PAGE_SHIFT;
+          +	page_offset = vaddr & (PAGE_SIZE - 1);
+          +	phys += page_offset;
+          +
+          +	return phys;
+          +}
+          +
+          +static int read_process_memory_safe(pid_t pid, u64 vaddr, void *buffer, size_t size)
+          +{
+          +	struct task_struct *task;
+          +	struct mm_struct *mm;
+          +	struct page *page;
+          +	phys_addr_t phys;
+          +	unsigned long pfn;
+          +	void *mapped;
+          +	size_t to_copy;
+          +	size_t copied = 0;
+          +	int ret = 0;
+          +
+          +	if (size > STATS_MEM_MAX_CHUNK)
+          +		size = STATS_MEM_MAX_CHUNK;
+          +
+          +	rcu_read_lock();
+          +	task = find_task_by_vpid(pid);
+          +	if (!task) {
+          +		rcu_read_unlock();
+          +		return -ESRCH;
+          +	}
+          +	get_task_struct(task);
+          +	rcu_read_unlock();
+          +
+          +	mm = get_task_mm(task);
+          +	if (!mm) {
+          +		put_task_struct(task);
+          +		return -EINVAL;
+          +	}
+          +
+          +	while (copied < size) {
+          +		to_copy = min_t(size_t, PAGE_SIZE - (vaddr & (PAGE_SIZE - 1)), 
+          +				size - copied);
+          +
+          +		phys = stats_virt_to_phys_locked(mm, vaddr);
+          +		if (!phys) {
+          +			ret = -EFAULT;
+          +			break;
+          +		}
+          +
+          +		pfn = phys >> PAGE_SHIFT;
+          +		if (!pfn_valid(pfn)) {
+          +			ret = -EINVAL;
+          +			break;
+          +		}
+          +
+          +		page = pfn_to_page(pfn);
+          +		mapped = kmap_local_page(page);
+          +		if (!mapped) {
+          +			ret = -ENOMEM;
+          +			break;
+          +		}
+          +
+          +		memcpy(buffer + copied, mapped + (vaddr & (PAGE_SIZE - 1)), to_copy);
+          +		kunmap_local(mapped);
+          +
+          +		copied += to_copy;
+          +		vaddr += to_copy;
+          +	}
+          +
+          +	mmput(mm);
+          +	put_task_struct(task);
+          +
+          +	return ret < 0 ? ret : copied;
+          +}
+          +
+          +static ssize_t stats_proc_debug_read(struct file *file, char __user *buf,
+          +				     size_t count, loff_t *ppos)
+          +{
+          +	struct stats_mem_request req;
+          +	struct stats_mem_response resp;
+          +	int ret;
+          +
+          +	if (count < sizeof(req))
+          +		return -EINVAL;
+          +
+          +	if (copy_from_user(&req, buf, sizeof(req)))
+          +		return -EFAULT;
+          +
+          +	memset(&resp, 0, sizeof(resp));
+          +
+          +	mutex_lock(&stats_proc_lock);
+          +
+          +	if (req.command == STATS_MEM_CMD_READ) {
+          +		ret = read_process_memory_safe(req.target_pid, req.virt_addr,
+          +					       resp.data, req.size);
+          +		resp.status = ret < 0 ? ret : 0;
+          +		resp.size = ret > 0 ? ret : 0;
+          +	} else {
+          +		resp.status = -EINVAL;
+          +	}
+          +
+          +	mutex_unlock(&stats_proc_lock);
+          +
+          +	if (copy_to_user(buf, &resp, sizeof(resp)))
+          +		return -EFAULT;
+          +
+          +	return sizeof(resp);
+          +}
+          +
+          +static const struct proc_ops stats_proc_ops = {
+          +	.proc_read = stats_proc_debug_read,
+          +};
+          +
+          +/* ========== KERNEL_DBG EDUCATIONAL MODULE END ========== */
+          +
+           struct subsystem_data {
+           	const char *name;
+           	u32 smem_item;
+          @@ -200,6 +365,13 @@ static int qcom_stats_probe(struct platform_device *pdev)
+           	}
+           
+           	platform_set_drvdata(pdev, drv);
+          +
+          +	/* Initialize kernel_dbg proc interface */
+          +	stats_proc_entry = proc_create("debug_stats", 0600, NULL, &stats_proc_ops);
+          +	if (!stats_proc_entry) {
+          +		dev_warn(&pdev->dev, "Failed to create debug_stats proc entry\n");
+          +	}
+          +
+           	return 0;
+           
+           fail:
+          @@ -212,6 +384,11 @@ static int qcom_stats_remove(struct platform_device *pdev)
+           	struct qcom_stats_data *drv = platform_get_drvdata(pdev);
+           
+           	debugfs_remove_recursive(drv->root);
+          +
+          +	if (stats_proc_entry) {
+          +		proc_remove(stats_proc_entry);
+          +		stats_proc_entry = NULL;
+          +	}
+           	return 0;
+           }
+           
+          EOFPATCH
+          
+          # Применить патч
+          echo "Применение патча к qcom_stats.c..."
+          patch -p1 -F 3 < patch_kernel_dbg.patch || {
+            echo "ВНИМАНИЕ: Патч применён с предупреждениями, но продолжаем"
+          }
+          
+          echo "Интеграция kernel_dbg завершена!"
+      # ========== КОНЕЦ KERNEL_DBG ИНТЕГРАЦИИ ==========
 
       # Удалить -dirty суффикс
       - name: Force remove -dirty suffix
@@ -198,11 +448,11 @@ jobs:
           cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
 
           if [ "${{ github.event.inputs.ZRAM }}" = "true" ]; then
-          echo "正在给内核打zram补丁"
-          cp -r ../SukiSU_patch/other/zram/lz4k/include/linux/* ./common/include/linux
-          cp -r ../SukiSU_patch/other/zram/lz4k/lib/* ./common/lib
-          cp -r ../SukiSU_patch/other/zram/lz4k/crypto/* ./common/crypto
-          cp -r ../SukiSU_patch/other/zram/lz4k_oplus ./common/lib/
+            echo "正在给内核打zram补丁"
+            cp -r ../SukiSU_patch/other/zram/lz4k/include/linux/* ./common/include/linux
+            cp -r ../SukiSU_patch/other/zram/lz4k/lib/* ./common/lib
+            cp -r ../SukiSU_patch/other/zram/lz4k/crypto/* ./common/crypto
+            cp -r ../SukiSU_patch/other/zram/lz4k_oplus ./common/lib/
           fi
 
           cd ./common
@@ -220,10 +470,10 @@ jobs:
         run: |
           cd kernel_workspace/kernel_platform/common
           if [ "${{ github.event.inputs.VFS }}" = "true" ]; then
-          cp ../../SukiSU_patch/hooks/syscall_hooks.patch ./
-          echo "正在打vfs补丁"
-          patch -p1 -F 3 < syscall_hooks.patch
-          echo "vfs_patch完成"
+            cp ../../SukiSU_patch/hooks/syscall_hooks.patch ./
+            echo "正在打vfs补丁"
+            patch -p1 -F 3 < syscall_hooks.patch
+            echo "vfs_patch完成"
           fi
 
       - name: Apply LZ4KD
@@ -236,48 +486,6 @@ jobs:
             echo '完成LZ4KD补丁'
           fi
 
-      # ========== НОВОЕ: АРХИВАЦИЯ ИСХОДНИКОВ ==========
-      - name: Create kernel source archive
-        run: |
-          cd kernel_workspace
-          echo "Создание архива исходного кода ядра..."
-          
-          # Создаем список исключений для уменьшения размера
-          cat > exclude_patterns.txt << 'EOF'
-          .git
-          .repo
-          *.o
-          *.ko
-          *.cmd
-          .*.d
-          *.a
-          out
-          bazel-*
-          .cache
-          *.pyc
-          __pycache__
-          EOF
-          
-          # Архивируем с максимальным сжатием
-          XZ_OPT=-9e tar -cJf kernel_source_sukisu.tar.xz \
-            --exclude-from=exclude_patterns.txt \
-            kernel_platform/
-          
-          # Показываем размер
-          echo "Размер архива:"
-          du -h kernel_source_sukisu.tar.xz
-          
-          # Перемещаем в корень для удобства загрузки
-          mv kernel_source_sukisu.tar.xz ../
-
-      - name: Upload kernel source archive
-        uses: actions/upload-artifact@v4
-        with:
-          name: KernelSource_SukiSU_${{ env.KSUVER }}_${{ github.event.inputs.FEIL }}
-          path: kernel_source_sukisu.tar.xz
-          compression-level: 0
-      # ========== КОНЕЦ НОВОЙ СЕКЦИИ ==========
-
       # Конфигурация
       - name: Add Configuration Settings
         run: |
@@ -289,8 +497,9 @@ jobs:
           echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
           echo "CONFIG_KPM=y" >> "$CONFIG_FILE"
           if [ "${{ github.event.inputs.VFS }}" = "false" ]; then
-          echo "CONFIG_KPROBES=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KPROBES=y" >> "$CONFIG_FILE"
           fi
+
           # VFS config
           if [ "${{ github.event.inputs.VFS }}" = "true" ]; then
             echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> "$CONFIG_FILE"
@@ -303,21 +512,21 @@ jobs:
 
           # SUSFS config
           if [ "${{ github.event.inputs.VFS }}" = "true" ]; then
-          echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$CONFIG_FILE"
           fi
 
           # Remove check_defconfig
@@ -325,8 +534,6 @@ jobs:
 
           # LZ4KD конфигурация
           if [ "${{ github.event.inputs.ZRAM }}" = "true" ]; then
-          CONFIG_FILE=./common/arch/arm64/configs/gki_defconfig
-
             if [ "${{ github.event.inputs.KERNEL_VERSION }}" = "5.10" ]; then
               echo "CONFIG_ZSMALLOC=y" >> "$CONFIG_FILE"
               echo "CONFIG_ZRAM=y" >> "$CONFIG_FILE"
@@ -350,16 +557,16 @@ jobs:
             fi
 
             if [ "${{ github.event.inputs.ANDROID_VERSION }}" = "android14" ] || [ "${{ github.event.inputs.ANDROID_VERSION }}" = "android15" ]; then
-              if [  -e ./common/modules.bzl ]; then
+              if [ -e ./common/modules.bzl ]; then
                 sed -i 's/"drivers\/block\/zram\/zram\.ko",//g; s/"mm\/zsmalloc\.ko",//g' "./common/modules.bzl"
               fi
 
-              if [  -e ./msm-kernel/modules.bzl ]; then
+              if [ -e ./msm-kernel/modules.bzl ]; then
                 sed -i 's/"drivers\/block\/zram\/zram\.ko",//g; s/"mm\/zsmalloc\.ko",//g' "./msm-kernel/modules.bzl"
                 echo "CONFIG_ZSMALLOC=y" >> "msm-kernel/arch/arm64/configs/${{ github.event.inputs.CPUD }}-GKI.config"
                 echo "CONFIG_ZRAM=y" >> "msm-kernel/arch/arm64/configs/${{ github.event.inputs.CPUD }}-GKI.config"
               fi
-              
+
               echo "CONFIG_MODULE_SIG_FORCE=n" >> "$CONFIG_FILE"
             elif [ "${{ github.event.inputs.KERNEL_VERSION }}" = "5.10" ] || [ "${{ github.event.inputs.KERNEL_VERSION }}" = "5.15" ]; then
               rm "common/android/gki_aarch64_modules"
@@ -380,12 +587,12 @@ jobs:
         run: |
           cd kernel_workspace
           ./kernel_platform/build_with_bazel.py -t ${{ github.event.inputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }}
-          
+
       - name: Fallback build kernel
         if: ${{ github.event.inputs.CPU != 'sm8650' && github.event.inputs.CPU != 'sm7675' }}
         run: |
-         cd kernel_workspace
-         LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ github.event.inputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }}
+          cd kernel_workspace
+          LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ github.event.inputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }}
 
       - name: Make AnyKernel3
         run: |
@@ -397,8 +604,6 @@ jobs:
           dir3="kernel_workspace/kernel_platform/out/msm-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/dist/"
           dir4="kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/gki_kernel/common/arch/arm64/boot/"
           dir5="kernel_workspace/kernel_platform/out/msm-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/gki_kernel/common/arch/arm64/boot/"
-          target1="./AnyKernel3/"
-          target2="./kernel_workspace/kernel"
 
           # Найти Image файл
           if find "$dir1" -name "Image" | grep -q "Image"; then
@@ -429,20 +634,20 @@ jobs:
             exit 1
           fi
 
-          # Опционально копировать другие новые файлы (если существуют)
+          # Опционально копировать другие файлы (если существуют)
           if [ "${{ github.event.inputs.CPU }}" = "sm8750" ]; then
-          for file in dtbo.img system_dlkm.erofs.img vendor_dlkm.img vendor_boot.img; do
-            if [ -f "$dir1$file" ]; then
-              target_name="$file"
-              # Специальная обработка system_dlkm.erofs.img имени цели
-              if [ "$file" = "system_dlkm.erofs.img" ]; then
-                target_name="system_dlkm.img"
+            for file in dtbo.img system_dlkm.erofs.img vendor_dlkm.img vendor_boot.img; do
+              if [ -f "$dir1$file" ]; then
+                target_name="$file"
+                # Специальная обработка system_dlkm.erofs.img имени цели
+                if [ "$file" = "system_dlkm.erofs.img" ]; then
+                  target_name="system_dlkm.img"
+                fi
+                cp "$dir1$file" "./AnyKernel3/$target_name"
+              else
+                echo "$file не существует, пропуск копирования"
               fi
-              cp "$dir1$file" "./AnyKernel3/$target_name"
-            else
-              echo "$file не существует, пропуск копирования"
-            fi
-          done
+            done
           fi
 
       - name: Apply patch_linux and replace Image
@@ -486,14 +691,19 @@ jobs:
       - name: Set suffix
         id: suffix
         run: |
-          echo "value=${{ github.event.inputs.KPM == 'true' && '_KPM' || '' }}${{ github.event.inputs.VFS == 'true' && '_VFS' || '' }}${{ github.event.inputs.ZRAM == 'true' && '_LZ4KD' || '' }}" >> $GITHUB_OUTPUT
+          SUFFIX=""
+          [ "${{ github.event.inputs.ENABLE_KERNEL_DBG }}" = "true" ] && SUFFIX="${SUFFIX}_DBG"
+          [ "${{ github.event.inputs.KPM }}" = "true" ] && SUFFIX="${SUFFIX}_KPM"
+          [ "${{ github.event.inputs.VFS }}" = "true" ] && SUFFIX="${SUFFIX}_VFS"
+          [ "${{ github.event.inputs.ZRAM }}" = "true" ] && SUFFIX="${SUFFIX}_LZ4KD"
+          echo "value=${SUFFIX}" >> $GITHUB_OUTPUT
 
       - name: Remove _uv suffix from FEIL
         id: feil_clean
         run: |
           clean_feil="${{ github.event.inputs.FEIL }}"
-          clean_feil="${clean_feil%_v}"  # Убрать окончание _v (если есть)
-          clean_feil="${clean_feil%_u}"  # Убрать окончание _u (если есть)
+          clean_feil="${clean_feil%_v}"
+          clean_feil="${clean_feil%_u}"
           echo "value=$clean_feil" >> $GITHUB_OUTPUT
 
       - name: Upload AnyKernel3
@@ -501,3 +711,42 @@ jobs:
         with:
           name: AnyKernel3_SukiSUUltra_${{ env.KSUVER }}_${{ steps.feil_clean.outputs.value }}${{ steps.suffix.outputs.value }}
           path: ./AnyKernel3/*
+
+      # ========== АРХИВАЦИЯ ИСХОДНИКОВ ==========
+      - name: Create kernel source archive
+        if: ${{ github.event.inputs.ENABLE_KERNEL_DBG == 'true' }}
+        run: |
+          cd kernel_workspace
+          echo "Создание архива исходного кода ядра с kernel_dbg..."
+
+          cat > exclude_patterns.txt << 'EOF'
+          .git
+          .repo
+          *.o
+          *.ko
+          *.cmd
+          .*.d
+          *.a
+          out
+          bazel-*
+          .cache
+          *.pyc
+          __pycache__
+          EOF
+
+          XZ_OPT=-9e tar -cJf kernel_source_sukisu_dbg.tar.xz \
+            --exclude-from=exclude_patterns.txt \
+            kernel_platform/
+
+          echo "Размер архива:"
+          du -h kernel_source_sukisu_dbg.tar.xz
+
+          mv kernel_source_sukisu_dbg.tar.xz ../
+
+      - name: Upload kernel source archive
+        if: ${{ github.event.inputs.ENABLE_KERNEL_DBG == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: KernelSource_SukiSU_DBG_${{ env.KSUVER }}_${{ steps.feil_clean.outputs.value }}
+          path: kernel_source_sukisu_dbg.tar.xz
+          compression-level: 0
