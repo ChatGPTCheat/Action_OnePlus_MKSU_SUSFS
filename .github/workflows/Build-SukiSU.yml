@@ -83,29 +83,34 @@ on:
         options:
           - gki
           - perf
-      ENABLE_KERNEL_DBG:
-        type: boolean
-        description: "启用 kernel_dbg 教育模块？"
+      # ========== ОБЪЕДИНЁННЫЕ ОПЦИИ ==========
+      FEATURES:
+        type: choice
+        description: "特性组合 (DBG=kernel_dbg模块)"
         required: true
-        default: true
+        default: "VFS+KPM+DBG"
+        options:
+          - "VFS+KPM+DBG"
+          - "VFS+KPM"
+          - "VFS+DBG"
+          - "KPM+DBG"
+          - "VFS"
+          - "KPM"
+          - "DBG"
+          - "NONE"
       SUSFS_CI:
         type: boolean
         description: "下载SUSFS模块是否使用CI构建？"
         required: true
         default: true
-      VFS:
-        type: boolean
-        description: "是否启用手动钩子？"
-        required: true
-        default: true
-      KPM:
-        type: boolean
-        description: "是否启用KPM？"
-        required: true
-        default: true
       ZRAM:
         type: boolean
         description: "是否启用添加更多的ZRAM算法？"
+        required: true
+        default: false
+      ARCHIVE_SOURCE:
+        type: boolean
+        description: "是否打包内核源码？(仅当启用DBG时)"
         required: true
         default: false
 
@@ -114,6 +119,30 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Parse FEATURES input
+        id: parse_features
+        run: |
+          FEATURES="${{ github.event.inputs.FEATURES }}"
+          
+          # Определяем флаги
+          if [[ "$FEATURES" == *"VFS"* ]]; then
+            echo "VFS=true" >> $GITHUB_OUTPUT
+          else
+            echo "VFS=false" >> $GITHUB_OUTPUT
+          fi
+          
+          if [[ "$FEATURES" == *"KPM"* ]]; then
+            echo "KPM=true" >> $GITHUB_OUTPUT
+          else
+            echo "KPM=false" >> $GITHUB_OUTPUT
+          fi
+          
+          if [[ "$FEATURES" == *"DBG"* ]]; then
+            echo "ENABLE_KERNEL_DBG=true" >> $GITHUB_OUTPUT
+          else
+            echo "ENABLE_KERNEL_DBG=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Maximize build space
         uses: easimon/maximize-build-space@master
         with:
@@ -143,11 +172,13 @@ jobs:
           echo "Selected ANDROID_VERSION: ${{ github.event.inputs.ANDROID_VERSION }}"
           echo "Selected KERNEL_VERSION: ${{ github.event.inputs.KERNEL_VERSION }}"
           echo "Selected BUILD_METHOD: ${{ github.event.inputs.BUILD_METHOD }}"
-          echo "Selected ENABLE_KERNEL_DBG: ${{ github.event.inputs.ENABLE_KERNEL_DBG }}"
+          echo "Selected FEATURES: ${{ github.event.inputs.FEATURES }}"
+          echo "Parsed VFS: ${{ steps.parse_features.outputs.VFS }}"
+          echo "Parsed KPM: ${{ steps.parse_features.outputs.KPM }}"
+          echo "Parsed ENABLE_KERNEL_DBG: ${{ steps.parse_features.outputs.ENABLE_KERNEL_DBG }}"
           echo "Selected SUSFS_CI: ${{ github.event.inputs.SUSFS_CI }}"
           echo "Selected ZRAM: ${{ github.event.inputs.ZRAM }}"
-          echo "Selected VFS: ${{ github.event.inputs.VFS }}"
-          echo "Selected KPM: ${{ github.event.inputs.KPM }}"
+          echo "Selected ARCHIVE_SOURCE: ${{ github.event.inputs.ARCHIVE_SOURCE }}"
 
       - name: Install repo tool
         run: |
@@ -169,9 +200,9 @@ jobs:
           rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
           rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      # ========== НОВОЕ: ИНТЕГРАЦИЯ KERNEL_DBG ==========
+      # ========== ИНТЕГРАЦИЯ KERNEL_DBG ==========
       - name: Apply kernel_dbg integration patch
-        if: ${{ github.event.inputs.ENABLE_KERNEL_DBG == 'true' }}
+        if: ${{ steps.parse_features.outputs.ENABLE_KERNEL_DBG == 'true' }}
         run: |
           cd kernel_workspace/kernel_platform
           
@@ -405,16 +436,13 @@ jobs:
            
           EOFPATCH
           
-          # Применить патч
           echo "Применение патча к qcom_stats.c..."
           patch -p1 -F 3 < patch_kernel_dbg.patch || {
             echo "ВНИМАНИЕ: Патч применён с предупреждениями, но продолжаем"
           }
           
           echo "Интеграция kernel_dbg завершена!"
-      # ========== КОНЕЦ KERNEL_DBG ИНТЕГРАЦИИ ==========
 
-      # Удалить -dirty суффикс
       - name: Force remove -dirty suffix
         run: |
           cd kernel_workspace/kernel_platform
@@ -425,7 +453,6 @@ jobs:
           git add -A
           git commit -m "Force remove -dirty suffix from kernel version"
 
-      # Добавить SukiSU Ultra
       - name: Add KernelSU-SukiSU Ultra
         run: |
           cd kernel_workspace/kernel_platform
@@ -469,7 +496,7 @@ jobs:
       - name: Apply VFS
         run: |
           cd kernel_workspace/kernel_platform/common
-          if [ "${{ github.event.inputs.VFS }}" = "true" ]; then
+          if [ "${{ steps.parse_features.outputs.VFS }}" = "true" ]; then
             cp ../../SukiSU_patch/hooks/syscall_hooks.patch ./
             echo "正在打vfs补丁"
             patch -p1 -F 3 < syscall_hooks.patch
@@ -486,32 +513,21 @@ jobs:
             echo '完成LZ4KD补丁'
           fi
 
-      # Конфигурация
       - name: Add Configuration Settings
         run: |
           cd kernel_workspace/kernel_platform
           CONFIG_FILE=./common/arch/arm64/configs/gki_defconfig
-          KERNEL_VERSION="${{ github.event.inputs.KERNEL_VERSION }}"
-
-          # SukiSU Ultra config
+          
           echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
           echo "CONFIG_KPM=y" >> "$CONFIG_FILE"
-          if [ "${{ github.event.inputs.VFS }}" = "false" ]; then
+          
+          if [ "${{ steps.parse_features.outputs.VFS }}" = "false" ]; then
             echo "CONFIG_KPROBES=y" >> "$CONFIG_FILE"
           fi
 
-          # VFS config
-          if [ "${{ github.event.inputs.VFS }}" = "true" ]; then
+          if [ "${{ steps.parse_features.outputs.VFS }}" = "true" ]; then
             echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> "$CONFIG_FILE"
             echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$CONFIG_FILE"
-          fi
-
-          if [ "${{ github.event.inputs.VFS }}" = "false" ]; then
-            echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> "$CONFIG_FILE"
-          fi
-
-          # SUSFS config
-          if [ "${{ github.event.inputs.VFS }}" = "true" ]; then
             echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
             echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$CONFIG_FILE"
             echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CONFIG_FILE"
@@ -527,13 +543,15 @@ jobs:
             echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> "$CONFIG_FILE"
             echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> "$CONFIG_FILE"
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$CONFIG_FILE"
+          else
+            echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> "$CONFIG_FILE"
           fi
 
-          # Remove check_defconfig
           sed -i 's/check_defconfig//' ./common/build.config.gki
 
-          # LZ4KD конфигурация
+          # ZRAM конфигурация
           if [ "${{ github.event.inputs.ZRAM }}" = "true" ]; then
+            # ... (остальная логика ZRAM без изменений)
             if [ "${{ github.event.inputs.KERNEL_VERSION }}" = "5.10" ]; then
               echo "CONFIG_ZSMALLOC=y" >> "$CONFIG_FILE"
               echo "CONFIG_ZRAM=y" >> "$CONFIG_FILE"
@@ -605,7 +623,6 @@ jobs:
           dir4="kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/gki_kernel/common/arch/arm64/boot/"
           dir5="kernel_workspace/kernel_platform/out/msm-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/gki_kernel/common/arch/arm64/boot/"
 
-          # Найти Image файл
           if find "$dir1" -name "Image" | grep -q "Image"; then
             image_path="$dir1"Image
           elif find "$dir2" -name "Image" | grep -q "Image"; then
@@ -620,41 +637,33 @@ jobs:
             image_path=$(find "./kernel_workspace/kernel_platform/common/out/" -name "Image" | head -n 1)
           fi
 
-          # Копировать Image
           if [ -n "$image_path" ] && [ -f "$image_path" ]; then
             mkdir -p "$dir1"
             if [ "$(realpath "$image_path")" != "$(realpath "$dir1"Image)" ]; then
               cp "$image_path" "$dir1"
-            else
-              echo "Источник и цель одинаковы, пропуск копирования"
             fi
             cp "$dir1"Image ./AnyKernel3/Image
           else
-            echo "Image файл не найден, сборка могла не удаться"
+            echo "Image файл не найден"
             exit 1
           fi
 
-          # Опционально копировать другие файлы (если существуют)
           if [ "${{ github.event.inputs.CPU }}" = "sm8750" ]; then
             for file in dtbo.img system_dlkm.erofs.img vendor_dlkm.img vendor_boot.img; do
               if [ -f "$dir1$file" ]; then
                 target_name="$file"
-                # Специальная обработка system_dlkm.erofs.img имени цели
                 if [ "$file" = "system_dlkm.erofs.img" ]; then
                   target_name="system_dlkm.img"
                 fi
                 cp "$dir1$file" "./AnyKernel3/$target_name"
-              else
-                echo "$file не существует, пропуск копирования"
               fi
             done
           fi
 
       - name: Apply patch_linux and replace Image
-        if: ${{ github.event.inputs.KPM == 'true' }}
+        if: ${{ steps.parse_features.outputs.KPM == 'true' }}
         run: |
-          cd /home/runner/work/Action_OnePlus_MKSU_SUSFS/Action_OnePlus_MKSU_SUSFS/kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/dist
-
+          cd kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/dist
           curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU_patch/refs/heads/main/kpm/patch_linux" -o patch_linux
           chmod +x patch_linux
           ./patch_linux
@@ -662,7 +671,6 @@ jobs:
           mv oImage Image
           cp Image $GITHUB_WORKSPACE/AnyKernel3/Image
 
-      # Скачать SUSFS модуль (CI)
       - name: Download Latest SUSFS Module from CI
         if: ${{ github.event.inputs.SUSFS_CI == 'true' }}
         run: |
@@ -671,7 +679,7 @@ jobs:
             jq -r '.workflow_runs[] | select(.head_branch == "v1.5.2+") | .id' | head -n 1)
 
           if [ -z "$LATEST_RUN_ID" ]; then
-            echo "Не найден успешный запуск для ветки v1.5.2+"
+            echo "Не найден успешный запуск"
             exit 1
           fi
 
@@ -681,7 +689,6 @@ jobs:
           curl -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o ksu_module_susfs.zip "$ARTIFACT_URL"
           cp ksu_module_susfs.zip ./AnyKernel3/
 
-      # Скачать SUSFS модуль (Release)
       - name: Download Latest SUSFS Module from Release
         if: ${{ github.event.inputs.SUSFS_CI == 'false' }}
         run: |
@@ -691,10 +698,11 @@ jobs:
       - name: Set suffix
         id: suffix
         run: |
+          FEATURES="${{ github.event.inputs.FEATURES }}"
           SUFFIX=""
-          [ "${{ github.event.inputs.ENABLE_KERNEL_DBG }}" = "true" ] && SUFFIX="${SUFFIX}_DBG"
-          [ "${{ github.event.inputs.KPM }}" = "true" ] && SUFFIX="${SUFFIX}_KPM"
-          [ "${{ github.event.inputs.VFS }}" = "true" ] && SUFFIX="${SUFFIX}_VFS"
+          [[ "$FEATURES" == *"DBG"* ]] && SUFFIX="${SUFFIX}_DBG"
+          [[ "$FEATURES" == *"KPM"* ]] && SUFFIX="${SUFFIX}_KPM"
+          [[ "$FEATURES" == *"VFS"* ]] && SUFFIX="${SUFFIX}_VFS"
           [ "${{ github.event.inputs.ZRAM }}" = "true" ] && SUFFIX="${SUFFIX}_LZ4KD"
           echo "value=${SUFFIX}" >> $GITHUB_OUTPUT
 
@@ -712,13 +720,10 @@ jobs:
           name: AnyKernel3_SukiSUUltra_${{ env.KSUVER }}_${{ steps.feil_clean.outputs.value }}${{ steps.suffix.outputs.value }}
           path: ./AnyKernel3/*
 
-      # ========== АРХИВАЦИЯ ИСХОДНИКОВ ==========
       - name: Create kernel source archive
-        if: ${{ github.event.inputs.ENABLE_KERNEL_DBG == 'true' }}
+        if: ${{ steps.parse_features.outputs.ENABLE_KERNEL_DBG == 'true' && github.event.inputs.ARCHIVE_SOURCE == 'true' }}
         run: |
           cd kernel_workspace
-          echo "Создание архива исходного кода ядра с kernel_dbg..."
-
           cat > exclude_patterns.txt << 'EOF'
           .git
           .repo
@@ -740,11 +745,10 @@ jobs:
 
           echo "Размер архива:"
           du -h kernel_source_sukisu_dbg.tar.xz
-
           mv kernel_source_sukisu_dbg.tar.xz ../
 
       - name: Upload kernel source archive
-        if: ${{ github.event.inputs.ENABLE_KERNEL_DBG == 'true' }}
+        if: ${{ steps.parse_features.outputs.ENABLE_KERNEL_DBG == 'true' && github.event.inputs.ARCHIVE_SOURCE == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: KernelSource_SukiSU_DBG_${{ env.KSUVER }}_${{ steps.feil_clean.outputs.value }}
