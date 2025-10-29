@@ -178,35 +178,23 @@ jobs:
           rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
           rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: Apply kernel_dbg integration (FIXED)
+      - name: Create kernel_dbg module
         if: ${{ steps.parse_features.outputs.ENABLE_KERNEL_DBG == 'true' }}
         run: |
           cd kernel_workspace/kernel_platform/msm-kernel/drivers/soc/qcom
-          echo "🔧 Integrating kernel_dbg into qcom_stats.c..."
+          echo "🔧 Creating kernel_dbg.c..."
           
-          python3 << 'PYEOF'
-          import sys
-          import re
-          
-          with open('qcom_stats.c', 'r') as f:
-              content = f.read()
-          
-          # Find insertion point after clocksource include
-          pattern = r'(#include\s+<clocksource/arm_arch_timer\.h>\s*)'
-          match = re.search(pattern, content)
-          if not match:
-              print("❌ ERROR: Could not find insertion point after clocksource include")
-              sys.exit(1)
-          
-          pos = match.end()
-          
-          # Full kernel_dbg code block
-          injection_code = '''
+          cat > kernel_dbg.c << 'EOFC'
+          // SPDX-License-Identifier: GPL-2.0-only
+          #include <linux/module.h>
+          #include <linux/proc_fs.h>
+          #include <linux/uaccess.h>
           #include <linux/pid.h>
           #include <linux/mm.h>
           #include <linux/highmem.h>
-          
-          /* ========== KERNEL_DBG EDUCATIONAL MODULE START ========== */
+          #include <linux/sched.h>
+          #include <linux/sched/mm.h>
+          #include <linux/mutex.h>
           
           #define STATS_MEM_MAX_CHUNK PAGE_SIZE
           
@@ -377,73 +365,38 @@ jobs:
           	.proc_read = stats_proc_debug_read,
           };
           
-          /* ========== KERNEL_DBG EDUCATIONAL MODULE END ========== */
-          '''
-          
-          # Insert code after clocksource include
-          content = content[:pos] + injection_code + content[pos:]
-          
-          # Add initialization in probe function
-          probe_init = '''
-          	/* Initialize kernel_dbg proc interface */
+          static int __init kernel_dbg_init(void)
+          {
           	stats_proc_entry = proc_create("debug_stats", 0600, NULL, &stats_proc_ops);
           	if (!stats_proc_entry) {
-          		dev_warn(&pdev->dev, "Failed to create debug_stats proc entry\\n");
+          		pr_err("kernel_dbg: Failed to create /proc/debug_stats\n");
+          		return -ENOMEM;
           	}
-          '''
-          content = re.sub(r'(\tplatform_set_drvdata\(pdev, drv\);)', r'\1' + probe_init, content)
+          	pr_info("kernel_dbg: /proc/debug_stats created\n");
+          	return 0;
+          }
           
-          # Add cleanup in remove function
-          remove_cleanup = '''
+          static void __exit kernel_dbg_exit(void)
+          {
           	if (stats_proc_entry) {
           		proc_remove(stats_proc_entry);
           		stats_proc_entry = NULL;
           	}
-          '''
-          content = re.sub(r'(\tdebugfs_remove_recursive\(drv->root\);)', r'\1' + remove_cleanup, content)
+          	pr_info("kernel_dbg: module unloaded\n");
+          }
           
-          # Write modified file
-          with open('qcom_stats.c', 'w') as f:
-              f.write(content)
+          module_init(kernel_dbg_init);
+          module_exit(kernel_dbg_exit);
           
-          print("✅ kernel_dbg code integrated")
+          MODULE_LICENSE("GPL v2");
+          MODULE_DESCRIPTION("Kernel debug memory interface");
+          MODULE_AUTHOR("Educational");
+          EOFC
           
-          # Verification
-          errors = []
-          if 'static struct proc_dir_entry *stats_proc_entry;' not in content:
-              errors.append("Variable 'stats_proc_entry' not declared")
-          else:
-              print("✅ Variable stats_proc_entry declared")
+          # Add to Makefile
+          echo 'obj-y += kernel_dbg.o' >> Makefile
           
-          if 'static const struct proc_ops stats_proc_ops' not in content:
-              errors.append("Structure 'stats_proc_ops' not found")
-          else:
-              print("✅ Structure stats_proc_ops added")
-          
-          if 'stats_virt_to_phys_locked' not in content:
-              errors.append("Function 'stats_virt_to_phys_locked' not found")
-          else:
-              print("✅ Page table walk function added")
-          
-          if 'read_process_memory_safe' not in content:
-              errors.append("Function 'read_process_memory_safe' not found")
-          else:
-              print("✅ Memory read function added")
-          
-          if 'proc_create("debug_stats"' not in content:
-              errors.append("proc_create call not found in probe")
-          else:
-              print("✅ proc_create call added to probe")
-          
-          if errors:
-              print("\n❌ ERRORS DETECTED:")
-              for err in errors:
-                  print(f"  - {err}")
-              sys.exit(1)
-          else:
-              print("\n🎉 All components verified successfully!")
-          
-          PYEOF
+          echo "✅ kernel_dbg.c created and added to Makefile"
 
       - name: Force remove -dirty suffix
         run: |
