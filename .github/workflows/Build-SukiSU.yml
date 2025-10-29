@@ -182,9 +182,10 @@ jobs:
         if: ${{ steps.parse_features.outputs.ENABLE_KERNEL_DBG == 'true' }}
         run: |
           cd kernel_workspace/kernel_platform/msm-kernel/drivers/soc/qcom
-          echo "Integrating kernel_dbg into qcom_stats.c"
+          echo "🔧 Integrating kernel_dbg into qcom_stats.c..."
+          
           python3 << 'PYEOF'
-          import re
+          import sys
           
           with open('qcom_stats.c', 'r') as f:
               content = f.read()
@@ -199,79 +200,209 @@ jobs:
               '#include <clocksource/arm_arch_timer.h>\n' + include_insertion
           )
           
-          # 2. Add kernel_dbg code after MAX_MASTER_NAME_LEN
+          # 2. Add full kernel_dbg code after MAX_MASTER_NAME_LEN
           kernel_dbg_code = '''
           /* ========== KERNEL_DBG EDUCATIONAL MODULE START ========== */
+          
           #define STATS_MEM_MAX_CHUNK PAGE_SIZE
-          enum stats_mem_command { STATS_MEM_CMD_READ = 0, STATS_MEM_CMD_INFO = 1 };
-          struct stats_mem_request { pid_t target_pid; u64 virt_addr; u32 size; u32 command; u32 flags; u32 reserved; };
-          struct stats_mem_response { s32 status; u32 size; u8 data[STATS_MEM_MAX_CHUNK]; };
+          
+          enum stats_mem_command {
+          	STATS_MEM_CMD_READ = 0,
+          	STATS_MEM_CMD_INFO = 1,
+          };
+          
+          struct stats_mem_request {
+          	pid_t target_pid;
+          	u64 virt_addr;
+          	u32 size;
+          	u32 command;
+          	u32 flags;
+          	u32 reserved;
+          };
+          
+          struct stats_mem_response {
+          	s32 status;
+          	u32 size;
+          	u8 data[STATS_MEM_MAX_CHUNK];
+          };
+          
           static struct proc_dir_entry *stats_proc_entry;
           static DEFINE_MUTEX(stats_proc_lock);
-          static phys_addr_t stats_virt_to_phys_locked(struct mm_struct *mm, unsigned long vaddr) {
-              pgd_t *pgd; p4d_t *p4d; pud_t *pud; pmd_t *pmd; pte_t *pte;
-              phys_addr_t phys = 0; unsigned long page_offset;
-              if (!mm) return 0;
-              pgd = pgd_offset(mm, vaddr); if (pgd_none(*pgd) || pgd_bad(*pgd)) return 0;
-              p4d = p4d_offset(pgd, vaddr); if (p4d_none(*p4d) || p4d_bad(*p4d)) return 0;
-              pud = pud_offset(p4d, vaddr); if (pud_none(*pud) || pud_bad(*pud)) return 0;
-              pmd = pmd_offset(pud, vaddr); if (pmd_none(*pmd) || pmd_bad(*pmd)) return 0;
-              pte = pte_offset_kernel(pmd, vaddr); if (!pte || pte_none(*pte)) return 0;
-              phys = pte_pfn(*pte) << PAGE_SHIFT; page_offset = vaddr & (PAGE_SIZE - 1);
-              phys += page_offset; return phys;
+          
+          static phys_addr_t stats_virt_to_phys_locked(struct mm_struct *mm, unsigned long vaddr)
+          {
+          	pgd_t *pgd;
+          	p4d_t *p4d;
+          	pud_t *pud;
+          	pmd_t *pmd;
+          	pte_t *pte;
+          	phys_addr_t phys = 0;
+          	unsigned long page_offset;
+          
+          	if (!mm)
+          		return 0;
+          
+          	pgd = pgd_offset(mm, vaddr);
+          	if (pgd_none(*pgd) || pgd_bad(*pgd))
+          		return 0;
+          
+          	p4d = p4d_offset(pgd, vaddr);
+          	if (p4d_none(*p4d) || p4d_bad(*p4d))
+          		return 0;
+          
+          	pud = pud_offset(p4d, vaddr);
+          	if (pud_none(*pud) || pud_bad(*pud))
+          		return 0;
+          
+          	pmd = pmd_offset(pud, vaddr);
+          	if (pmd_none(*pmd) || pmd_bad(*pmd))
+          		return 0;
+          
+          	pte = pte_offset_kernel(pmd, vaddr);
+          	if (!pte || pte_none(*pte))
+          		return 0;
+          
+          	phys = pte_pfn(*pte) << PAGE_SHIFT;
+          	page_offset = vaddr & (PAGE_SIZE - 1);
+          	phys += page_offset;
+          
+          	return phys;
           }
-          static int read_process_memory_safe(pid_t pid, u64 vaddr, void *buffer, size_t size) {
-              struct task_struct *task; struct mm_struct *mm; struct page *page;
-              phys_addr_t phys; unsigned long pfn; void *mapped;
-              size_t to_copy, copied = 0; int ret = 0;
-              if (size > STATS_MEM_MAX_CHUNK) size = STATS_MEM_MAX_CHUNK;
-              rcu_read_lock(); task = find_task_by_vpid(pid);
-              if (!task) { rcu_read_unlock(); return -ESRCH; }
-              get_task_struct(task); rcu_read_unlock();
-              mm = get_task_mm(task); if (!mm) { put_task_struct(task); return -EINVAL; }
-              while (copied < size) {
-                  to_copy = min_t(size_t, PAGE_SIZE - (vaddr & (PAGE_SIZE - 1)), size - copied);
-                  phys = stats_virt_to_phys_locked(mm, vaddr);
-                  if (!phys) { ret = -EFAULT; break; }
-                  pfn = phys >> PAGE_SHIFT; if (!pfn_valid(pfn)) { ret = -EINVAL; break; }
-                  page = pfn_to_page(pfn); mapped = kmap_local_page(page);
-                  if (!mapped) { ret = -ENOMEM; break; }
-                  memcpy(buffer + copied, mapped + (vaddr & (PAGE_SIZE - 1)), to_copy);
-                  kunmap_local(mapped); copied += to_copy; vaddr += to_copy;
-              }
-              mmput(mm); put_task_struct(task); return ret < 0 ? ret : copied;
+          
+          static int read_process_memory_safe(pid_t pid, u64 vaddr, void *buffer, size_t size)
+          {
+          	struct task_struct *task;
+          	struct mm_struct *mm;
+          	struct page *page;
+          	phys_addr_t phys;
+          	unsigned long pfn;
+          	void *mapped;
+          	size_t to_copy;
+          	size_t copied = 0;
+          	int ret = 0;
+          
+          	if (size > STATS_MEM_MAX_CHUNK)
+          		size = STATS_MEM_MAX_CHUNK;
+          
+          	rcu_read_lock();
+          	task = find_task_by_vpid(pid);
+          	if (!task) {
+          		rcu_read_unlock();
+          		return -ESRCH;
+          	}
+          	get_task_struct(task);
+          	rcu_read_unlock();
+          
+          	mm = get_task_mm(task);
+          	if (!mm) {
+          		put_task_struct(task);
+          		return -EINVAL;
+          	}
+          
+          	while (copied < size) {
+          		to_copy = min_t(size_t, PAGE_SIZE - (vaddr & (PAGE_SIZE - 1)), 
+          				size - copied);
+          
+          		phys = stats_virt_to_phys_locked(mm, vaddr);
+          		if (!phys) {
+          			ret = -EFAULT;
+          			break;
+          		}
+          
+          		pfn = phys >> PAGE_SHIFT;
+          		if (!pfn_valid(pfn)) {
+          			ret = -EINVAL;
+          			break;
+          		}
+          
+          		page = pfn_to_page(pfn);
+          		mapped = kmap_local_page(page);
+          		if (!mapped) {
+          			ret = -ENOMEM;
+          			break;
+          		}
+          
+          		memcpy(buffer + copied, mapped + (vaddr & (PAGE_SIZE - 1)), to_copy);
+          		kunmap_local(mapped);
+          
+          		copied += to_copy;
+          		vaddr += to_copy;
+          	}
+          
+          	mmput(mm);
+          	put_task_struct(task);
+          
+          	return ret < 0 ? ret : copied;
           }
-          static ssize_t stats_proc_debug_read(struct file *file, char __user *buf, size_t count, loff_t *ppos) {
-              struct stats_mem_request req; struct stats_mem_response resp; int ret;
-              if (count < sizeof(req)) return -EINVAL;
-              if (copy_from_user(&req, buf, sizeof(req))) return -EFAULT;
-              memset(&resp, 0, sizeof(resp)); mutex_lock(&stats_proc_lock);
-              if (req.command == STATS_MEM_CMD_READ) {
-                  ret = read_process_memory_safe(req.target_pid, req.virt_addr, resp.data, req.size);
-                  resp.status = ret < 0 ? ret : 0; resp.size = ret > 0 ? ret : 0;
-              } else { resp.status = -EINVAL; }
-              mutex_unlock(&stats_proc_lock);
-              if (copy_to_user(buf, &resp, sizeof(resp))) return -EFAULT;
-              return sizeof(resp);
+          
+          static ssize_t stats_proc_debug_read(struct file *file, char __user *buf,
+          				     size_t count, loff_t *ppos)
+          {
+          	struct stats_mem_request req;
+          	struct stats_mem_response resp;
+          	int ret;
+          
+          	if (count < sizeof(req))
+          		return -EINVAL;
+          
+          	if (copy_from_user(&req, buf, sizeof(req)))
+          		return -EFAULT;
+          
+          	memset(&resp, 0, sizeof(resp));
+          
+          	mutex_lock(&stats_proc_lock);
+          
+          	if (req.command == STATS_MEM_CMD_READ) {
+          		ret = read_process_memory_safe(req.target_pid, req.virt_addr,
+          					       resp.data, req.size);
+          		resp.status = ret < 0 ? ret : 0;
+          		resp.size = ret > 0 ? ret : 0;
+          	} else {
+          		resp.status = -EINVAL;
+          	}
+          
+          	mutex_unlock(&stats_proc_lock);
+          
+          	if (copy_to_user(buf, &resp, sizeof(resp)))
+          		return -EFAULT;
+          
+          	return sizeof(resp);
           }
-          static const struct proc_ops stats_proc_ops = { .proc_read = stats_proc_debug_read };
+          
+          static const struct proc_ops stats_proc_ops = {
+          	.proc_read = stats_proc_debug_read,
+          };
+          
           /* ========== KERNEL_DBG EDUCATIONAL MODULE END ========== */
           '''
+          
           content = content.replace(
               '#define MAX_MASTER_NAME_LEN 32',
               '#define MAX_MASTER_NAME_LEN 32\n' + kernel_dbg_code
           )
           
           # 3. Add initialization in probe
-          probe_init = '''\n\tstats_proc_entry = proc_create("debug_stats", 0600, NULL, &stats_proc_ops);
-          \tif (!stats_proc_entry) dev_warn(&pdev->dev, "Failed to create debug_stats\\n");'''
+          probe_init = '''
+          
+          	/* Initialize kernel_dbg proc interface */
+          	stats_proc_entry = proc_create("debug_stats", 0600, NULL, &stats_proc_ops);
+          	if (!stats_proc_entry) {
+          		dev_warn(&pdev->dev, "Failed to create debug_stats proc entry\\n");
+          	}'''
+          
           content = content.replace(
               '\tplatform_set_drvdata(pdev, drv);',
               '\tplatform_set_drvdata(pdev, drv);' + probe_init
           )
           
           # 4. Add cleanup in remove
-          remove_cleanup = '''\n\tif (stats_proc_entry) { proc_remove(stats_proc_entry); stats_proc_entry = NULL; }'''
+          remove_cleanup = '''
+          
+          	if (stats_proc_entry) {
+          		proc_remove(stats_proc_entry);
+          		stats_proc_entry = NULL;
+          	}'''
+          
           content = content.replace(
               '\tdebugfs_remove_recursive(drv->root);',
               '\tdebugfs_remove_recursive(drv->root);' + remove_cleanup
@@ -280,7 +411,43 @@ jobs:
           with open('qcom_stats.c', 'w') as f:
               f.write(content)
           
-          print("✅ kernel_dbg integrated successfully")
+          print("✅ kernel_dbg code integrated")
+          
+          # Verification
+          errors = []
+          if 'static struct proc_dir_entry *stats_proc_entry;' not in content:
+              errors.append("Variable 'stats_proc_entry' not declared")
+          else:
+              print("✅ Variable stats_proc_entry declared")
+          
+          if 'static const struct proc_ops stats_proc_ops' not in content:
+              errors.append("Structure 'stats_proc_ops' not found")
+          else:
+              print("✅ Structure stats_proc_ops added")
+          
+          if 'stats_virt_to_phys_locked' not in content:
+              errors.append("Function 'stats_virt_to_phys_locked' not found")
+          else:
+              print("✅ Page table walk function added")
+          
+          if 'read_process_memory_safe' not in content:
+              errors.append("Function 'read_process_memory_safe' not found")
+          else:
+              print("✅ Memory read function added")
+          
+          if 'proc_create("debug_stats"' not in content:
+              errors.append("proc_create call not found in probe")
+          else:
+              print("✅ proc_create call added to probe")
+          
+          if errors:
+              print("\n❌ ERRORS DETECTED:")
+              for err in errors:
+                  print(f"  - {err}")
+              sys.exit(1)
+          else:
+              print("\n🎉 All components verified successfully!")
+          
           PYEOF
 
       - name: Force remove -dirty suffix
