@@ -178,7 +178,7 @@ jobs:
           rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
           rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
-      - name: Apply kernel_dbg integration
+      - name: Apply kernel_dbg integration (FIXED)
         if: ${{ steps.parse_features.outputs.ENABLE_KERNEL_DBG == 'true' }}
         run: |
           cd kernel_workspace/kernel_platform/msm-kernel/drivers/soc/qcom
@@ -186,22 +186,26 @@ jobs:
           
           python3 << 'PYEOF'
           import sys
+          import re
           
           with open('qcom_stats.c', 'r') as f:
               content = f.read()
           
-          # 1. Add includes after clocksource
-          include_insertion = '''#include <linux/pid.h>
+          # Find insertion point after clocksource include
+          pattern = r'(#include\s+<clocksource/arm_arch_timer\.h>\s*)'
+          match = re.search(pattern, content)
+          if not match:
+              print("❌ ERROR: Could not find insertion point after clocksource include")
+              sys.exit(1)
+          
+          pos = match.end()
+          
+          # Full kernel_dbg code block
+          injection_code = '''
+          #include <linux/pid.h>
           #include <linux/mm.h>
           #include <linux/highmem.h>
-          '''
-          content = content.replace(
-              '#include <clocksource/arm_arch_timer.h>',
-              '#include <clocksource/arm_arch_timer.h>\n' + include_insertion
-          )
           
-          # 2. Add full kernel_dbg code after MAX_MASTER_NAME_LEN
-          kernel_dbg_code = '''
           /* ========== KERNEL_DBG EDUCATIONAL MODULE START ========== */
           
           #define STATS_MEM_MAX_CHUNK PAGE_SIZE
@@ -376,38 +380,29 @@ jobs:
           /* ========== KERNEL_DBG EDUCATIONAL MODULE END ========== */
           '''
           
-          content = content.replace(
-              '#define MAX_MASTER_NAME_LEN 32',
-              '#define MAX_MASTER_NAME_LEN 32\n' + kernel_dbg_code
-          )
+          # Insert code after clocksource include
+          content = content[:pos] + injection_code + content[pos:]
           
-          # 3. Add initialization in probe
+          # Add initialization in probe function
           probe_init = '''
-          
           	/* Initialize kernel_dbg proc interface */
           	stats_proc_entry = proc_create("debug_stats", 0600, NULL, &stats_proc_ops);
           	if (!stats_proc_entry) {
           		dev_warn(&pdev->dev, "Failed to create debug_stats proc entry\\n");
-          	}'''
+          	}
+          '''
+          content = re.sub(r'(\tplatform_set_drvdata\(pdev, drv\);)', r'\1' + probe_init, content)
           
-          content = content.replace(
-              '\tplatform_set_drvdata(pdev, drv);',
-              '\tplatform_set_drvdata(pdev, drv);' + probe_init
-          )
-          
-          # 4. Add cleanup in remove
+          # Add cleanup in remove function
           remove_cleanup = '''
-          
           	if (stats_proc_entry) {
           		proc_remove(stats_proc_entry);
           		stats_proc_entry = NULL;
-          	}'''
+          	}
+          '''
+          content = re.sub(r'(\tdebugfs_remove_recursive\(drv->root\);)', r'\1' + remove_cleanup, content)
           
-          content = content.replace(
-              '\tdebugfs_remove_recursive(drv->root);',
-              '\tdebugfs_remove_recursive(drv->root);' + remove_cleanup
-          )
-          
+          # Write modified file
           with open('qcom_stats.c', 'w') as f:
               f.write(content)
           
