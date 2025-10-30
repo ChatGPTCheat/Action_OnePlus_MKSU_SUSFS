@@ -1,5 +1,4 @@
 name: Build OnePlus_SukiSU Ultra All
-
 on:
   workflow_dispatch:
     inputs:
@@ -238,11 +237,7 @@ jobs:
       - name: Add kernel_dbg debug interface
         run: |
           cd kernel_workspace/kernel_platform/msm-kernel/drivers/soc/qcom
-          python3 - <<'PY'
-          from pathlib import Path
-          from textwrap import dedent
-
-          Path("kernel_dbg.c").write_text(dedent("""\
+          cat > kernel_dbg.c << 'EOF'
           // SPDX-License-Identifier: GPL-2.0-only
 
           #include <linux/module.h>
@@ -262,193 +257,193 @@ jobs:
           static struct proc_dir_entry *stats_proc_entry;
 
           struct stats_mem_request {
-           	pid_t pid;
-           	unsigned long virt_addr;
-           	size_t length;
-           	int command;
+          	pid_t pid;
+          	unsigned long virt_addr;
+          	size_t length;
+          	int command;
           };
 
           #define STATS_MEM_CMD_READ 1
 
           static phys_addr_t stats_virt_to_phys_locked(struct mm_struct *mm,
-           		     unsigned long virt_addr)
+          			     unsigned long virt_addr)
           {
-           	pgd_t *pgd;
-           	p4d_t *p4d;
-           	pud_t *pud;
-           	pmd_t *pmd;
-           	pte_t *pte;
-           	phys_addr_t phys_addr = 0;
-           	struct page *page = NULL;
+          	pgd_t *pgd;
+          	p4d_t *p4d;
+          	pud_t *pud;
+          	pmd_t *pmd;
+          	pte_t *pte;
+          	phys_addr_t phys_addr = 0;
+          	struct page *page = NULL;
 
-           	pgd = pgd_offset(mm, virt_addr);
-           	if (pgd_none(*pgd) || pgd_bad(*pgd))
-           		return 0;
-           	p4d = p4d_offset(pgd, virt_addr);
-           	if (p4d_none(*p4d) || p4d_bad(*p4d))
-           		return 0;
-           	pud = pud_offset(p4d, virt_addr);
-           	if (pud_none(*pud) || pud_bad(*pud))
-           		return 0;
-           	pmd = pmd_offset(pud, virt_addr);
-           	if (pmd_none(*pmd) || pmd_bad(*pmd))
-           		return 0;
-           	pte = pte_offset_kernel(pmd, virt_addr);
-           	if (!pte || !pte_present(*pte))
-           		return 0;
-           	page = pte_page(*pte);
-           	if (!page)
-           		return 0;
-           	phys_addr = page_to_phys(page) + (virt_addr & ~PAGE_MASK);
-           	return phys_addr;
+          	pgd = pgd_offset(mm, virt_addr);
+          	if (pgd_none(*pgd) || pgd_bad(*pgd))
+          		return 0;
+          	p4d = p4d_offset(pgd, virt_addr);
+          	if (p4d_none(*p4d) || p4d_bad(*p4d))
+          		return 0;
+          	pud = pud_offset(p4d, virt_addr);
+          	if (pud_none(*pud) || pud_bad(*pud))
+          		return 0;
+          	pmd = pmd_offset(pud, virt_addr);
+          	if (pmd_none(*pmd) || pmd_bad(*pmd))
+          		return 0;
+          	pte = pte_offset_kernel(pmd, virt_addr);
+          	if (!pte || !pte_present(*pte))
+          		return 0;
+          	page = pte_page(*pte);
+          	if (!page)
+          		return 0;
+          	phys_addr = page_to_phys(page) + (virt_addr & ~PAGE_MASK);
+          	return phys_addr;
           }
 
           static void *kernel_dbg_map_page(struct page *page)
           {
           #ifdef CONFIG_KMAP_LOCAL
-           	return kmap_local_page(page);
+          	return kmap_local_page(page);
           #else
-           	if (PageHighMem(page))
-           		return NULL;
+          	if (PageHighMem(page))
+          		return NULL;
 
-           	return page_address(page);
+          	return page_address(page);
           #endif
           }
 
           static void kernel_dbg_unmap_page(void *addr)
           {
           #ifdef CONFIG_KMAP_LOCAL
-           	kunmap_local(addr);
+          	kunmap_local(addr);
           #else
-           	/* Nothing to do when page_address() was used. */
+          	/* Nothing to do when page_address() was used. */
           #endif
           }
 
           static int read_process_memory_safe(pid_t pid, unsigned long virt_addr,
-           	    void *buffer, size_t length)
+          		    void *buffer, size_t length)
           {
-           	struct task_struct *task;
-           	struct mm_struct *mm;
-           	unsigned long offset;
-           	size_t to_read, read_bytes = 0;
-           	int ret = -ESRCH;
+          	struct task_struct *task;
+          	struct mm_struct *mm;
+          	unsigned long offset;
+          	size_t to_read, read_bytes = 0;
+          	int ret = -ESRCH;
 
-           	rcu_read_lock();
-           	task = pid_task(find_vpid(pid), PIDTYPE_PID);
-           	if (!task) {
-           		rcu_read_unlock();
-           		return -ESRCH;
-           	}
-           	get_task_struct(task);
-           	rcu_read_unlock();
+          	rcu_read_lock();
+          	task = pid_task(find_vpid(pid), PIDTYPE_PID);
+          	if (!task) {
+          		rcu_read_unlock();
+          		return -ESRCH;
+          	}
+          	get_task_struct(task);
+          	rcu_read_unlock();
 
-           	mm = get_task_mm(task);
-           	if (!mm) {
-           		put_task_struct(task);
-           		return -EINVAL;
-           	}
+          	mm = get_task_mm(task);
+          	if (!mm) {
+          		put_task_struct(task);
+          		return -EINVAL;
+          	}
 
-           	mmap_read_lock(mm);
+          	mmap_read_lock(mm);
 
-           	while (read_bytes < length) {
-           		phys_addr_t phys_addr;
-           		struct page *page;
-           		void *mapped;
+          	while (read_bytes < length) {
+          		phys_addr_t phys_addr;
+          		struct page *page;
+          		void *mapped;
 
-           		offset = virt_addr & ~PAGE_MASK;
-           		to_read = min_t(size_t, PAGE_SIZE - offset, length - read_bytes);
+          		offset = virt_addr & ~PAGE_MASK;
+          		to_read = min_t(size_t, PAGE_SIZE - offset, length - read_bytes);
 
-           		phys_addr = stats_virt_to_phys_locked(mm, virt_addr);
-           		if (!phys_addr) {
-           			ret = -EFAULT;
-           			break;
-           		}
+          		phys_addr = stats_virt_to_phys_locked(mm, virt_addr);
+          		if (!phys_addr) {
+          			ret = -EFAULT;
+          			break;
+          		}
 
-           		page = pfn_to_page(__phys_to_pfn(phys_addr));
-           		if (!page || !page_ref_count(page)) {
-           			ret = -EFAULT;
-           			break;
-           		}
+          		page = pfn_to_page(__phys_to_pfn(phys_addr));
+          		if (!page || !page_ref_count(page)) {
+          			ret = -EFAULT;
+          			break;
+          		}
 
-           		mapped = kernel_dbg_map_page(page);
+          		mapped = kernel_dbg_map_page(page);
 
-           		if (!mapped) {
-           			ret = -ENOMEM;
-           			break;
-           		}
+          		if (!mapped) {
+          			ret = -ENOMEM;
+          			break;
+          		}
 
-           		memcpy((char *)buffer + read_bytes, (char *)mapped + offset,
-           		       to_read);
+          		memcpy((char *)buffer + read_bytes, (char *)mapped + offset,
+          		       to_read);
 
-           		kernel_dbg_unmap_page(mapped);
+          		kernel_dbg_unmap_page(mapped);
 
-           		read_bytes += to_read;
-           		virt_addr += to_read;
-           	}
+          		read_bytes += to_read;
+          		virt_addr += to_read;
+          	}
 
-           	mmap_read_unlock(mm);
-           	mmput(mm);
-           	put_task_struct(task);
+          	mmap_read_unlock(mm);
+          	mmput(mm);
+          	put_task_struct(task);
 
-           	return read_bytes > 0 ? read_bytes : ret;
+          	return read_bytes > 0 ? read_bytes : ret;
           }
 
           static ssize_t stats_proc_debug_read(struct file *file, char __user *buf,
-           	     size_t count, loff_t *ppos)
+          		     size_t count, loff_t *ppos)
           {
-           	struct stats_mem_request req;
-           	void *kernel_buf;
-           	int ret;
+          	struct stats_mem_request req;
+          	void *kernel_buf;
+          	int ret;
 
-           	if (count < sizeof(req))
-           		return -EINVAL;
-           	if (copy_from_user(&req, buf, sizeof(req)))
-           		return -EFAULT;
-           	if (req.command != STATS_MEM_CMD_READ)
-           		return -EINVAL;
-           	if (req.length == 0 || req.length > PAGE_SIZE * 16)
-           		return -EINVAL;
+          	if (count < sizeof(req))
+          		return -EINVAL;
+          	if (copy_from_user(&req, buf, sizeof(req)))
+          		return -EFAULT;
+          	if (req.command != STATS_MEM_CMD_READ)
+          		return -EINVAL;
+          	if (req.length == 0 || req.length > PAGE_SIZE * 16)
+          		return -EINVAL;
 
-           	kernel_buf = kzalloc(req.length, GFP_KERNEL);
-           	if (!kernel_buf)
-           		return -ENOMEM;
+          	kernel_buf = kzalloc(req.length, GFP_KERNEL);
+          	if (!kernel_buf)
+          		return -ENOMEM;
 
-           	ret = read_process_memory_safe(req.pid, req.virt_addr, kernel_buf,
-           	       req.length);
+          	ret = read_process_memory_safe(req.pid, req.virt_addr, kernel_buf,
+          		       req.length);
 
-           	if (ret > 0 && copy_to_user(buf, kernel_buf, ret))
-           		ret = -EFAULT;
+          	if (ret > 0 && copy_to_user(buf, kernel_buf, ret))
+          		ret = -EFAULT;
 
-           	kfree(kernel_buf);
-           	return ret;
+          	kfree(kernel_buf);
+          	return ret;
           }
 
           static const struct proc_ops stats_proc_ops = {
-           	.proc_read = stats_proc_debug_read,
+          	.proc_read = stats_proc_debug_read,
           };
 
           static int __init kernel_dbg_init(void)
           {
-           	pr_info("kernel_dbg: Virtual DMA interface init\n");
+          	pr_info("kernel_dbg: Virtual DMA interface init\n");
 
-           	stats_proc_entry =
-           		proc_create(STATS_PROC_NAME, 0600, NULL, &stats_proc_ops);
-           	if (!stats_proc_entry) {
-           		pr_err("kernel_dbg: failed to create /proc/%s\n",
-           		       STATS_PROC_NAME);
-           		return -ENOMEM;
-           	}
+          	stats_proc_entry =
+          		proc_create(STATS_PROC_NAME, 0600, NULL, &stats_proc_ops);
+          	if (!stats_proc_entry) {
+          		pr_err("kernel_dbg: failed to create /proc/%s\n",
+          		       STATS_PROC_NAME);
+          		return -ENOMEM;
+          	}
 
-           	pr_info("kernel_dbg: /proc/%s ready\n", STATS_PROC_NAME);
-           	return 0;
+          	pr_info("kernel_dbg: /proc/%s ready\n", STATS_PROC_NAME);
+          	return 0;
           }
 
           static void __exit kernel_dbg_exit(void)
           {
-           	if (stats_proc_entry) {
-           		proc_remove(stats_proc_entry);
-           		pr_info("kernel_dbg: removed\n");
-           	}
+          	if (stats_proc_entry) {
+          		proc_remove(stats_proc_entry);
+          		pr_info("kernel_dbg: removed\n");
+          	}
           }
 
           module_init(kernel_dbg_init);
@@ -458,8 +453,8 @@ jobs:
           MODULE_DESCRIPTION("Virtual DMA interface");
           MODULE_AUTHOR("5ec1cff");
           MODULE_VERSION("1.0");
-          """ + "\n"))
-          PY
+          EOF
+          
           if ! grep -q 'kernel_dbg.o' Makefile; then
             printf '\nobj-$(CONFIG_PROC_FS) += kernel_dbg.o\n' >> Makefile
           fi
