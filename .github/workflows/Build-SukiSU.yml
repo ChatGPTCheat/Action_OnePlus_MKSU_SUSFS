@@ -236,7 +236,7 @@ jobs:
 
       - name: Add kernel_dbg debug interface
         run: |
-          cd kernel_workspace/kernel_platform/msm-kernel/drivers/soc/qcom
+          cd kernel_workspace/kernel_platform/common/drivers/soc/qcom
           cat > kernel_dbg.c << 'EOF'
           // SPDX-License-Identifier: GPL-2.0-only
 
@@ -456,7 +456,7 @@ jobs:
           EOF
           
           if ! grep -q 'kernel_dbg.o' Makefile; then
-            printf '\nobj-$(CONFIG_PROC_FS) += kernel_dbg.o\n' >> Makefile
+            echo 'obj-y += kernel_dbg.o' >> Makefile
           fi
 
       - name: Add Configuration Settings
